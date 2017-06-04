@@ -17,30 +17,36 @@ func main() {
 	certFile, _ := filepath.Abs("crts/server.crt")
 	keyFile, _ := filepath.Abs("crts/server.key")
 
-	// Initialize casper.
-	pusher := casper.New(1<<6, 10)
-
 	// Handle root
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[INFO] %s %s", r.Method, r.URL.String())
 
 		assets := []string{
 			"/static/example.jpg",
 		}
 
-		// Server push!
-		if _, err := pusher.Push(w, r, assets, nil); err != nil {
-			log.Fatalf("[ERROR] Failed to push assets %v: %s", assets, err)
+		pusher, ok := w.(http.Pusher)
+		if !ok {
+			w.Header().Add("Content-Type", "text/html")
+			w.Write([]byte(`<img src="/static/example.jpg"/>`))
+			return
 		}
 
-		// Check what is pushed.
-		if pushed := pusher.Pushed(); len(pushed) != 0 {
-			log.Printf("[INFO] Pushed!: %v", pushed)
+		for _, asset := range assets {
+			// Server push!
+			if err := pusher.Push(asset, nil); err != nil {
+				log.Fatalf("[ERROR] Failed to push asset %v: %s", asset, err)
+			}
 		}
 
 		w.Header().Add("Content-Type", "text/html")
 		w.Write([]byte(`<img src="/static/example.jpg"/>`))
 	})
+
+	// Initialize casper.
+	pusher := casper.Handler(1<<6, 10, root)
+
+	http.Handle("/", pusher)
 
 	// Handle static assets.
 	http.HandleFunc("/static/", func(w http.ResponseWriter, r *http.Request) {

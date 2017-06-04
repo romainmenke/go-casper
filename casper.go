@@ -33,11 +33,9 @@ package casper
 
 import (
 	"bytes"
-	"context"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -57,18 +55,10 @@ const (
 	defaultCookiePath = "/"
 )
 
-var (
-	// hashContextkey is used for storing hash values in context.Value
-	hashContextkey = &contextKey{"casper-hash"}
-)
-
 // Casper provides a interface for cache-aware HTTP/2 server push.
 type Casper struct {
 	p uint
 	n uint
-
-	// buf is last assets pushed by a call to Push.
-	buf []string
 
 	// skipPush decides executing actual server push or not. This should
 	// be used only in testing.
@@ -76,113 +66,6 @@ type Casper struct {
 	// Currently, it's kinda hard to receive http push in go http client.
 	// This should be removed in future.
 	skipPush bool
-}
-
-// Options includes casper push options.
-type Options struct {
-	*http.PushOptions
-}
-
-type contextKey struct {
-	name string
-}
-
-func (c *contextKey) String() string {
-	return c.name
-}
-
-// New returns a new casper with false positive probability is 1/p and
-// number of contents.
-func New(p, n int) *Casper {
-	return &Casper{
-		p: uint(p),
-		n: uint(n),
-	}
-}
-
-// Push initiates an HTTP/2 server push using the given targets and options.
-// Internally, it just calls go's standard server push method (which was added
-// from go1.8).
-//
-// It generates a fingerprint of pushed targets compressed by Golomb-coding[1]
-// and sets it as a special cookie value to the given ResponseWriter. We can use
-// this cookie to determine the browser caches the specific targets or not.
-// So from next time when the server receives a request, it checks the cookie
-// and determine to push or not the given targets.
-//
-// [1]: https://en.wikipedia.org/wiki/Golomb_coding
-func (c *Casper) Push(w http.ResponseWriter, r *http.Request, targets []string, opts *Options) (*http.Request, error) {
-	// Empty buffer.
-	c.buf = make([]string, 0, len(targets))
-
-	// Pusher is used later in this function but should check
-	// it's available or not first to avoid unnessary calc.
-	pusher, ok := w.(http.Pusher)
-	if !ok {
-		return r, errors.New("server push is not supported") // go1.8 or later
-	}
-
-	if opts == nil {
-		opts = &Options{}
-	}
-
-	// Remove casper cookie header if it's already exists.
-	if cookies, ok := w.Header()["Set-Cookie"]; ok && len(cookies) != 0 {
-		w.Header().Del("Set-Cookie")
-		for _, cookieStr := range cookies {
-			if strings.Contains(cookieStr, defaultCookieName+"=") {
-				continue
-			}
-			w.Header().Add("Set-Cookie", cookieStr)
-		}
-	}
-
-	// Get hash values assosiated with previous parent context.
-	// If none, then read it from the request cookie.
-	hashValues := contextHashValues(r.Context())
-	if hashValues == nil {
-		var err error
-		hashValues, err = c.readCookie(r)
-		if err != nil {
-			return r, err
-		}
-	}
-
-	// Push contents one by one.
-	// TODO(tcnksm): Is it possible to push concurrently ?
-	for _, content := range targets {
-		h := c.hash([]byte(content))
-
-		// Check the content is already pushed or not.
-		if search(hashValues, h) {
-			continue
-		}
-
-		if !c.skipPush {
-			if err := pusher.Push(content, opts.PushOptions); err != nil {
-				return r, err
-			}
-		}
-
-		// also pushed in memory buffer
-		c.buf = append(c.buf, content)
-		hashValues = append(hashValues, h)
-	}
-
-	// TODO(tcnksm): Can be skip when nothing is pushed.
-	cookie, err := c.generateCookie(hashValues)
-	if err != nil {
-		return r, err
-	}
-	http.SetCookie(w, cookie)
-
-	return r.WithContext(withHashValues(r.Context(), hashValues)), nil
-}
-
-// Pushed returns the most recent assets pushed by a call to Push.
-// The underlying buffer may will be overwritten by next call to Push.
-func (c *Casper) Pushed() []string {
-	return c.buf
 }
 
 // hash generate a hash value from the given bytes for
@@ -249,19 +132,6 @@ func (c *Casper) readCookie(r *http.Request) ([]uint, error) {
 	}
 
 	return hashValues, nil
-}
-
-// withHashValues returns a new context based on previsous parent context.
-// It sets hashValues which is used for generating golomb encoded cookie value.
-func withHashValues(parent context.Context, hashValues []uint) context.Context {
-	return context.WithValue(parent, hashContextkey, hashValues)
-}
-
-// contextHashValues returns the hashValues assosiated with the
-// provided context. If none, it returns nil,
-func contextHashValues(ctx context.Context) []uint {
-	hashValues, _ := ctx.Value(hashContextkey).([]uint)
-	return hashValues
 }
 
 // search looks up the provided slices contains the given value.
